@@ -5,200 +5,196 @@ import discord
 from discord.ext import tasks
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-import re
 
-# --- Load secrets ---
+# ────────────────────────────────────────────────
+# Load secrets
+# ────────────────────────────────────────────────
 load_dotenv("secret.env")
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
 
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-
-# --- Store titles ---
+# ────────────────────────────────────────────────
+# Game URLs
+# ────────────────────────────────────────────────
 STEAM_TITLES = {
-    "Black Ops 1": "https://store.steampowered.com/app/42700/Call_of_Duty_Black_Ops/",
-    "Black Ops 2": "https://store.steampowered.com/app/202970/Call_of_Duty_Black_Ops_II/",
-    "Black Ops 3": "https://store.steampowered.com/app/311210/Call_of_Duty_Black_Ops_III/",
-    "Black Ops Cold War": "https://store.steampowered.com/app/1940340/Call_of_Duty_Black_Ops_Cold_War/",
-}
-
-BATTLE_TITLES = {
-    "Black Ops 4": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-4",
-}
-
-XBOX_TITLES = {
-    "Black Ops 1": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops/C1S3LPG1GR8V",
-    "Black Ops 2": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-ii/BSZB2X7F1VHQ",
-    "Black Ops 3": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-iii/BXH2MFJ43QK7",
-    "Black Ops Cold War": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-cold-war/9N4LGGJ7C2TL",
+    "Call of Duty: Black Ops III": "https://store.steampowered.com/app/311210/",
+    "Call of Duty: Infinite Warfare": "https://store.steampowered.com/app/292730/",
 }
 
 PS_TITLES = {
-    "Black Ops 3": "https://store.playstation.com/en-us/product/UP0002-CUSA02290_00-CODBO3FULLGAME00",
-    "Black Ops Cold War": "https://store.playstation.com/en-us/product/UP0002-CUSA15010_00-CODBOCWSTANDARD0",
-    "Black Ops 4": "https://store.playstation.com/en-us/product/UP0002-CUSA11100_00-CODBO4PREORDER000",
+    "Call of Duty: Black Ops III": "https://store.playstation.com/en-us/product/UP0002-CUSA02624_00-CODBLACKOPS30000",
+    "Call of Duty: Infinite Warfare": "https://store.playstation.com/en-us/product/UP0002-CUSA02910_00-CODINFWARFARE000",
 }
 
-# --- Load / Save sales memory ---
+XBOX_TITLES = {
+    "Call of Duty: Black Ops III": "https://www.xbox.com/en-us/games/store/call-of-duty-black-ops-iii/BP67CCPVDVZQ",
+    "Call of Duty: Infinite Warfare": "https://www.xbox.com/en-us/games/store/call-of-duty-infinite-warfare/BTCMZJ6X9FGL",
+}
+
+BATTLENET_TITLES = {
+    "Call of Duty: Black Ops 4": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-4",
+}
+
+# ────────────────────────────────────────────────
+# Utility helpers
+# ────────────────────────────────────────────────
 def load_seen_sales():
-    try:
-        with open("seen_sales.txt", "r") as f:
-            return set(f.read().splitlines())
-    except FileNotFoundError:
+    if not os.path.exists("seen_sales.txt"):
         return set()
+    with open("seen_sales.txt", "r") as f:
+        return set(line.strip() for line in f.readlines())
 
 def save_seen_sales(seen):
     with open("seen_sales.txt", "w") as f:
-        f.write("\n".join(sorted(seen)))
+        for item in seen:
+            f.write(item + "\n")
 
-# --- Price normalization ---
-def normalize_price(price: str) -> str:
-    price = price.strip()
-    # Detect currency symbol
-    if "€" in price:
-        currency = "EUR"
-    elif "£" in price:
-        currency = "GBP"
-    elif "$" in price:
-        currency = "USD"
-    else:
-        currency = "USD"  # fallback
-    # Extract numeric value
-    num = re.findall(r"[\d.,]+", price)
-    value = num[0] if num else price
-    return f"${value} {currency}"
+def create_sale_embed(name, platform, url, off, was=None, now=None, image_url=None):
+    colors = {"Steam": 0x1B2838, "PlayStation": 0x003087, "Xbox": 0x107C10, "Battle.net": 0x009AE4}
+    color = colors.get(platform, 0x2F3136)
+    embed = discord.Embed(
+        title=name,
+        description=f"🛒 **On Sale on {platform}**\n\n💰 **Was:** {was or '—'}\n💵 **Now:** {now or '—'}\n\n[View Deal]({url})",
+        color=color,
+    )
+    embed.set_footer(text=f"{platform} | {off}")
+    if image_url:
+        embed.set_image(url=image_url)
+    return embed
 
-# --- Scraper functions ---
+def get_image_from_store(soup, platform):
+    img = None
+    if platform == "Steam":
+        img = soup.select_one(".game_header_image_full")
+    elif platform == "PlayStation":
+        img = soup.select_one('img[data-qa="gameBackgroundImage#image#image"]')
+    elif platform == "Xbox":
+        img = soup.select_one("img.ProductDetailsHeader-module__productImage___3pklz")
+    elif platform == "Battle.net":
+        img = soup.select_one("img[src*='cdn']")
+    return img["src"] if img and img.get("src") else None
 
+# ────────────────────────────────────────────────
+# Platform checkers
+# ────────────────────────────────────────────────
 async def check_steam(session):
     found = []
     for name, url in STEAM_TITLES.items():
         try:
-            async with session.get(url) as resp:
-                html = await resp.text()
+            async with session.get(url) as r:
+                html = await r.text()
                 soup = BeautifulSoup(html, "html.parser")
-                discount = soup.select_one(".discount_pct")
-                price_now = soup.select_one(".discount_final_price")
-                price_was = soup.select_one(".discount_original_price")
-
-                if discount and price_now and price_was:
+                discount_block = soup.select_one(".discount_block")
+                if discount_block:
+                    was = discount_block.select_one(".discount_original_price")
+                    now = discount_block.select_one(".discount_final_price")
+                    off = discount_block.select_one(".discount_pct")
+                    img = get_image_from_store(soup, "Steam")
                     unique = f"steam_{name}"
-                    found.append((unique, name, url, discount.text.strip(),
-                                  normalize_price(price_was.text), normalize_price(price_now.text)))
+                    found.append((unique, name, "Steam", url,
+                                  off.text.strip() if off else "Sale",
+                                  was.text.strip() if was else None,
+                                  now.text.strip() if now else None,
+                                  img))
         except Exception as e:
-            print(f"[Steam] Error checking {name}: {e}")
+            print(f"[Steam] {name}: {e}")
     return found
-
-
-async def check_battle_net(session):
-    found = []
-    for name, url in BATTLE_TITLES.items():
-        try:
-            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-
-                current_price = soup.select_one('span[data-testid="product-price"]')
-                original_price = soup.select_one('span[data-testid="product-strikethrough-price"]')
-
-                if original_price and current_price:
-                    unique = f"bnet_{name}"
-                    found.append((unique, name, url, "On Sale",
-                                  normalize_price(original_price.text), normalize_price(current_price.text)))
-        except Exception as e:
-            print(f"[Battle.net] Error checking {name}: {e}")
-    return found
-
-
-async def check_xbox(session):
-    found = []
-    for name, url in XBOX_TITLES.items():
-        try:
-            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-
-                price_now = soup.select_one('[itemprop="price"]')
-                price_was = soup.select_one('.Price-text--strikethrough')
-
-                if price_now and price_was:
-                    unique = f"xbox_{name}"
-                    found.append((unique, name, url, "On Sale",
-                                  normalize_price(price_was.text), normalize_price(price_now.text)))
-        except Exception as e:
-            print(f"[Xbox] Error checking {name}: {e}")
-    return found
-
 
 async def check_playstation(session):
     found = []
     for name, url in PS_TITLES.items():
         try:
-            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                html = await resp.text()
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                html = await r.text()
                 soup = BeautifulSoup(html, "html.parser")
-
-                current_price = soup.select_one('[data-qa="mfeCtaMain#offer0#finalPrice"]')
-                original_price = soup.select_one('[data-qa="mfeCtaMain#offer0#originalPrice"]')
-
-                if original_price and current_price:
+                now = soup.select_one('[data-qa="mfeCtaMain#offer0#finalPrice"]')
+                was = soup.select_one('[data-qa="mfeCtaMain#offer0#originalPrice"]')
+                if was and now:
+                    img = get_image_from_store(soup, "PlayStation")
                     unique = f"ps_{name}"
-                    found.append((unique, name, url, "On Sale",
-                                  normalize_price(original_price.text), normalize_price(current_price.text)))
+                    found.append((unique, name, "PlayStation", url, "On Sale",
+                                  was.text.strip(), now.text.strip(), img))
         except Exception as e:
-            print(f"[PlayStation] Error checking {name}: {e}")
+            print(f"[PS] {name}: {e}")
     return found
 
-# --- Combine all stores ---
-async def check_all_stores():
-    async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(
-            check_steam(session),
-            check_battle_net(session),
-            check_xbox(session),
-            check_playstation(session),
-        )
-        return [sale for store_sales in results for sale in store_sales]
+async def check_xbox(session):
+    found = []
+    for name, url in XBOX_TITLES.items():
+        try:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                html = await r.text()
+                soup = BeautifulSoup(html, "html.parser")
+                now = soup.select_one(".Price-module__boldText___1kR5T, span[data-price-final]")
+                was = soup.select_one(".Price-module__strikethroughText___1FaDW")
+                if was and now:
+                    img = get_image_from_store(soup, "Xbox")
+                    unique = f"xbox_{name}"
+                    found.append((unique, name, "Xbox", url, "On Sale",
+                                  was.text.strip(), now.text.strip(), img))
+        except Exception as e:
+            print(f"[Xbox] {name}: {e}")
+    return found
 
+async def check_battlenet(session):
+    found = []
+    for name, url in BATTLENET_TITLES.items():
+        try:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                html = await r.text()
+                soup = BeautifulSoup(html, "html.parser")
+                now = soup.select_one(".ProductPrice-current")
+                was = soup.select_one(".ProductPrice-original")
+                if was and now:
+                    img = get_image_from_store(soup, "Battle.net")
+                    unique = f"bnet_{name}"
+                    found.append((unique, name, "Battle.net", url, "On Sale",
+                                  was.text.strip(), now.text.strip(), img))
+        except Exception as e:
+            print(f"[Battle.net] {name}: {e}")
+    return found
 
-# --- Discord Bot Behavior ---
+# ────────────────────────────────────────────────
+# Discord Bot setup
+# ────────────────────────────────────────────────
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+seen_sales = load_seen_sales()
+
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
     check_sales.start()
 
-
-@tasks.loop(minutes=60)
+@tasks.loop(minutes=30)
 async def check_sales():
-    print("🔎 Checking all stores...")
-    channel = client.get_channel(CHANNEL_ID)
-    seen = load_seen_sales()
-    new_seen = set(seen)
+    global seen_sales
+    new_seen = set()
+    async with aiohttp.ClientSession() as session:
+        all_sales = []
+        for checker in [check_steam, check_playstation, check_xbox, check_battlenet]:
+            all_sales.extend(await checker(session))
 
-    found_sales = await check_all_stores()
+        channel = client.get_channel(CHANNEL_ID)
+        if not channel:
+            print("Channel not found.")
+            return
 
-    for sale_id, name, url, off, was, now in found_sales:
-        if sale_id not in seen:
-            embed = discord.Embed(
-                title=f"{name} is on sale!",
-                url=url,
-                description=f"**{off}** — Was **{was}**, now **{now}**",
-                color=0x00ff99
-            )
-            embed.set_footer(text="Call of Duty Sale Tracker")
-            await channel.send(embed=embed)
-            new_seen.add(sale_id)
+        for unique, name, platform, url, off, was, now, img in all_sales:
+            new_seen.add(unique)
+            if unique not in seen_sales:
+                embed = create_sale_embed(name, platform, url, off, was, now, img)
+                await channel.send(embed=embed)
+                print(f"Posted sale: {name} on {platform}")
 
-    # Remove old sales if no longer active
-    current_ids = {s[0] for s in found_sales}
-    for old_sale in list(seen):
-        if old_sale not in current_ids:
-            new_seen.discard(old_sale)
+    # Forget old sales (so when sale ends, it can trigger again)
+    seen_sales = new_seen
+    save_seen_sales(seen_sales)
 
-    save_seen_sales(new_seen)
-    print("✅ Done checking.")
-
-
-client.run(TOKEN)
+# ────────────────────────────────────────────────
+# Run
+# ────────────────────────────────────────────────
+if TOKEN and CHANNEL_ID:
+    client.run(TOKEN)
+else:
+    print("❌ Missing DISCORD_TOKEN or CHANNEL_ID in secret.env")
