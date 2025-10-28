@@ -7,6 +7,15 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 # -------------------------
+# LOAD SECRET.ENV
+# -------------------------
+try:
+    from dotenv import load_dotenv
+    load_dotenv("secret.env")
+except ImportError:
+    print("⚠️ python-dotenv not installed (only needed for local testing).")
+
+# -------------------------
 # CONFIGURATION
 # -------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -32,15 +41,18 @@ PS_TITLES = {
     "Black Ops 3": "https://store.playstation.com/en-us/product/UP0002-CUSA02290_00-CODBO3ZOMBIESEDN",
 }
 
-CHECK_INTERVAL = 3600  # every hour
+CHECK_INTERVAL = 3600  # seconds (1 hour)
 SEEN_FILE = "seen_sales.txt"
 
 # -------------------------
-# DISCORD SETUP
+# DISCORD CLIENT SETUP
 # -------------------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
+# -------------------------
+# SEEN SALES HANDLER
+# -------------------------
 def load_seen():
     if not os.path.exists(SEEN_FILE):
         return set()
@@ -55,7 +67,7 @@ def save_seen(seen):
 seen_sales = load_seen()
 
 # -------------------------
-# SCRAPING HELPERS
+# PRICE PARSER
 # -------------------------
 def parse_price(text):
     text = text.replace(",", "").replace("$", "")
@@ -65,7 +77,7 @@ def parse_price(text):
         return None
 
 # -------------------------
-# SALE CHECKERS
+# SCRAPING FUNCTIONS
 # -------------------------
 async def check_steam(session):
     found = []
@@ -99,7 +111,7 @@ async def check_battlenet(session):
                     unique = f"bnet_{name}"
                     found.append((unique, name, url, "On Sale", None, None))
         except Exception as e:
-            print(f"[BNet] Error checking {name}: {e}")
+            print(f"[Battle.net] Error checking {name}: {e}")
     return found
 
 
@@ -109,27 +121,7 @@ async def check_xbox(session):
         try:
             async with session.get(url) as resp:
                 html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-
-                # look for price JSON embedded in script
-                if '"ListPrice"' in html and '"Price"' in html:
-                    start = html.find('"ListPrice"')
-                    snippet = html[start:start+300]
-                    lines = snippet.split('"')
-                    old_price = next((l for l in lines if "$" in l), None)
-                    new_price = None
-                    discount = None
-                    if old_price:
-                        idx = lines.index(old_price)
-                        if idx + 4 < len(lines):
-                            new_price = lines[idx+4]
-                            if parse_price(old_price) and parse_price(new_price):
-                                diff = (parse_price(old_price) - parse_price(new_price)) / parse_price(old_price)
-                                discount = f"-{int(diff*100)}%"
-                    if discount:
-                        unique = f"xbox_{name}"
-                        found.append((unique, name, url, discount, old_price, new_price))
-                elif any(term in html.lower() for term in ["% off", "save", "discount"]):
+                if any(term in html.lower() for term in ["% off", "discount", "save"]):
                     unique = f"xbox_{name}"
                     found.append((unique, name, url, "On Sale", None, None))
         except Exception as e:
@@ -143,7 +135,7 @@ async def check_playstation(session):
         try:
             async with session.get(url) as resp:
                 html = await resp.text()
-                if any(term in html.lower() for term in ["% off", "save", "discount"]):
+                if any(term in html.lower() for term in ["% off", "discount", "save"]):
                     unique = f"ps_{name}"
                     found.append((unique, name, url, "On Sale", None, None))
         except Exception as e:
@@ -151,12 +143,13 @@ async def check_playstation(session):
     return found
 
 # -------------------------
-# MAIN LOOP
+# SALE CHECK LOOP
 # -------------------------
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def sale_check_loop():
     global seen_sales
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking for sales...")
+
     async with aiohttp.ClientSession() as session:
         results = []
         for fn in [check_steam, check_battlenet, check_xbox, check_playstation]:
@@ -168,6 +161,10 @@ async def sale_check_loop():
         return
 
     channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print("❌ Invalid channel ID or missing permissions.")
+        return
+
     for unique, name, url, off, was, now in new_sales:
         platform = unique.split("_")[0].capitalize()
         embed = discord.Embed(
@@ -175,22 +172,28 @@ async def sale_check_loop():
             description=f"[View it here]({url})",
             color=discord.Color.green(),
         )
-        embed.add_field(name="Platform", value=platform)
+        embed.add_field(name="Platform", value=platform, inline=True)
+
         if was and now:
             embed.add_field(name="Price", value=f"~~{was}~~ → **{now}** ({off})", inline=False)
         else:
             embed.add_field(name="Status", value=off, inline=False)
+
         embed.set_footer(text=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
         await channel.send(embed=embed)
-        # Optional role ping (commented)
+
+        # Optional role ping — uncomment if desired
         # await channel.send("<@&ROLE_ID>")
 
         seen_sales.add(unique)
+
     save_seen(seen_sales)
-    print(f"Posted {len(new_sales)} new sales.")
+    print(f"✅ Posted {len(new_sales)} new sales.")
+
 
 # -------------------------
-# CLEANUP
+# CLEANUP OLD SALES
 # -------------------------
 @tasks.loop(hours=12)
 async def cleanup_seen():
@@ -202,7 +205,7 @@ async def cleanup_seen():
             current.update(s[0] for s in res)
         removed = seen_sales - current
         if removed:
-            print(f"Cleaning up {len(removed)} expired sales.")
+            print(f"🧹 Cleaning {len(removed)} expired sales...")
             seen_sales -= removed
             save_seen(seen_sales)
 
@@ -221,4 +224,4 @@ async def on_ready():
 if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
 else:
-    print("❌ Missing DISCORD_TOKEN or DISCORD_CHANNEL_ID.")
+    print("❌ Missing DISCORD_TOKEN or DISCORD_CHANNEL_ID in secret.env")
