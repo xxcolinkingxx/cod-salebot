@@ -1,224 +1,204 @@
 import os
-import aiohttp
 import asyncio
+import aiohttp
 import discord
 from discord.ext import tasks
-from datetime import datetime
 from bs4 import BeautifulSoup
-import threading
-from flask import Flask
 from dotenv import load_dotenv
+import re
 
-# -------------------------
-# LOAD SECRETS
-# -------------------------
+# --- Load secrets ---
 load_dotenv("secret.env")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
-# -------------------------
-# GAME LINKS
-# -------------------------
-STEAM_GAMES = {
-    "Black Ops 1": "https://store.steampowered.com/app/42700/",
-    "Black Ops 2": "https://store.steampowered.com/app/202970/",
-    "Black Ops 3": "https://store.steampowered.com/app/311210/",
-}
-BATTLENET_GAMES = {
-    "Black Ops 4": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-4",
-    "Cold War": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-cold-war",
-}
-XBOX_TITLES = {
-    "Black Ops 3": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-iii/C3Q2WWJJ2T1H",
-    "Black Ops 4": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-4/C19N0723PHFL",
-}
-PS_TITLES = {
-    "Black Ops 3": "https://store.playstation.com/en-us/product/UP0002-CUSA02290_00-CODBO3ZOMBIESEDN",
-}
-
-CHECK_INTERVAL = 3600  # seconds (1 hour)
-SEEN_FILE = "seen_sales.txt"
-
-# -------------------------
-# DISCORD SETUP
-# -------------------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-# -------------------------
-# FILE HANDLERS
-# -------------------------
-def load_seen():
-    if not os.path.exists(SEEN_FILE):
+# --- Store titles ---
+STEAM_TITLES = {
+    "Black Ops 1": "https://store.steampowered.com/app/42700/Call_of_Duty_Black_Ops/",
+    "Black Ops 2": "https://store.steampowered.com/app/202970/Call_of_Duty_Black_Ops_II/",
+    "Black Ops 3": "https://store.steampowered.com/app/311210/Call_of_Duty_Black_Ops_III/",
+    "Black Ops Cold War": "https://store.steampowered.com/app/1940340/Call_of_Duty_Black_Ops_Cold_War/",
+}
+
+BATTLE_TITLES = {
+    "Black Ops 4": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-4",
+}
+
+XBOX_TITLES = {
+    "Black Ops 1": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops/C1S3LPG1GR8V",
+    "Black Ops 2": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-ii/BSZB2X7F1VHQ",
+    "Black Ops 3": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-iii/BXH2MFJ43QK7",
+    "Black Ops Cold War": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-cold-war/9N4LGGJ7C2TL",
+}
+
+PS_TITLES = {
+    "Black Ops 3": "https://store.playstation.com/en-us/product/UP0002-CUSA02290_00-CODBO3FULLGAME00",
+    "Black Ops Cold War": "https://store.playstation.com/en-us/product/UP0002-CUSA15010_00-CODBOCWSTANDARD0",
+    "Black Ops 4": "https://store.playstation.com/en-us/product/UP0002-CUSA11100_00-CODBO4PREORDER000",
+}
+
+# --- Load / Save sales memory ---
+def load_seen_sales():
+    try:
+        with open("seen_sales.txt", "r") as f:
+            return set(f.read().splitlines())
+    except FileNotFoundError:
         return set()
-    with open(SEEN_FILE, "r") as f:
-        return set(line.strip() for line in f if line.strip())
 
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        for item in seen:
-            f.write(item + "\n")
+def save_seen_sales(seen):
+    with open("seen_sales.txt", "w") as f:
+        f.write("\n".join(sorted(seen)))
 
-seen_sales = load_seen()
+# --- Price normalization ---
+def normalize_price(price: str) -> str:
+    price = price.strip()
+    # Detect currency symbol
+    if "€" in price:
+        currency = "EUR"
+    elif "£" in price:
+        currency = "GBP"
+    elif "$" in price:
+        currency = "USD"
+    else:
+        currency = "USD"  # fallback
+    # Extract numeric value
+    num = re.findall(r"[\d.,]+", price)
+    value = num[0] if num else price
+    return f"${value} {currency}"
 
-# -------------------------
-# SCRAPERS
-# -------------------------
+# --- Scraper functions ---
+
 async def check_steam(session):
     found = []
-    for name, url in STEAM_GAMES.items():
+    for name, url in STEAM_TITLES.items():
         try:
             async with session.get(url) as resp:
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
                 discount = soup.select_one(".discount_pct")
-                final_price = soup.select_one(".discount_final_price")
-                original_price = soup.select_one(".discount_original_price")
+                price_now = soup.select_one(".discount_final_price")
+                price_was = soup.select_one(".discount_original_price")
 
-                if discount:
-                    off = discount.text.strip()
-                    now = final_price.text.strip() if final_price else "N/A"
-                    was = original_price.text.strip() if original_price else "N/A"
+                if discount and price_now and price_was:
                     unique = f"steam_{name}"
-                    found.append((unique, name, url, off, was, now))
+                    found.append((unique, name, url, discount.text.strip(),
+                                  normalize_price(price_was.text), normalize_price(price_now.text)))
         except Exception as e:
             print(f"[Steam] Error checking {name}: {e}")
     return found
 
-async def check_battlenet(session):
+
+async def check_battle_net(session):
     found = []
-    for name, url in BATTLENET_GAMES.items():
+    for name, url in BATTLE_TITLES.items():
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
                 html = await resp.text()
-                if any(term in html.lower() for term in ["sale", "% off", "discount"]):
+                soup = BeautifulSoup(html, "html.parser")
+
+                current_price = soup.select_one('span[data-testid="product-price"]')
+                original_price = soup.select_one('span[data-testid="product-strikethrough-price"]')
+
+                if original_price and current_price:
                     unique = f"bnet_{name}"
-                    found.append((unique, name, url, "On Sale", None, None))
+                    found.append((unique, name, url, "On Sale",
+                                  normalize_price(original_price.text), normalize_price(current_price.text)))
         except Exception as e:
             print(f"[Battle.net] Error checking {name}: {e}")
     return found
+
 
 async def check_xbox(session):
     found = []
     for name, url in XBOX_TITLES.items():
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
                 html = await resp.text()
-                if any(term in html.lower() for term in ["% off", "discount", "save"]):
+                soup = BeautifulSoup(html, "html.parser")
+
+                price_now = soup.select_one('[itemprop="price"]')
+                price_was = soup.select_one('.Price-text--strikethrough')
+
+                if price_now and price_was:
                     unique = f"xbox_{name}"
-                    found.append((unique, name, url, "On Sale", None, None))
+                    found.append((unique, name, url, "On Sale",
+                                  normalize_price(price_was.text), normalize_price(price_now.text)))
         except Exception as e:
             print(f"[Xbox] Error checking {name}: {e}")
     return found
+
 
 async def check_playstation(session):
     found = []
     for name, url in PS_TITLES.items():
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
                 html = await resp.text()
-                if any(term in html.lower() for term in ["% off", "discount", "save"]):
+                soup = BeautifulSoup(html, "html.parser")
+
+                current_price = soup.select_one('[data-qa="mfeCtaMain#offer0#finalPrice"]')
+                original_price = soup.select_one('[data-qa="mfeCtaMain#offer0#originalPrice"]')
+
+                if original_price and current_price:
                     unique = f"ps_{name}"
-                    found.append((unique, name, url, "On Sale", None, None))
+                    found.append((unique, name, url, "On Sale",
+                                  normalize_price(original_price.text), normalize_price(current_price.text)))
         except Exception as e:
             print(f"[PlayStation] Error checking {name}: {e}")
     return found
 
-# -------------------------
-# SALE CHECK LOOP
-# -------------------------
-@tasks.loop(seconds=CHECK_INTERVAL)
-async def sale_check_loop():
-    global seen_sales
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking for sales...")
-
+# --- Combine all stores ---
+async def check_all_stores():
     async with aiohttp.ClientSession() as session:
-        results = []
-        for fn in [check_steam, check_battlenet, check_xbox, check_playstation]:
-            results.extend(await fn(session))
-
-    new_sales = [s for s in results if s[0] not in seen_sales]
-    if not new_sales:
-        print("No new sales found.")
-        return
-
-    channel = client.get_channel(CHANNEL_ID)
-    if not channel:
-        print("❌ Invalid channel ID or missing permissions.")
-        return
-
-    for unique, name, url, off, was, now in new_sales:
-        platform = unique.split("_")[0].capitalize()
-        embed = discord.Embed(
-            title=f"🔥 {name} is on Sale!",
-            description=f"[View it here]({url})",
-            color=discord.Color.green(),
+        results = await asyncio.gather(
+            check_steam(session),
+            check_battle_net(session),
+            check_xbox(session),
+            check_playstation(session),
         )
-        embed.add_field(name="Platform", value=platform, inline=True)
+        return [sale for store_sales in results for sale in store_sales]
 
-        if was and now:
-            embed.add_field(name="Price", value=f"~~{was}~~ → **{now}** ({off})", inline=False)
-        else:
-            embed.add_field(name="Status", value=off, inline=False)
 
-        embed.set_footer(text=datetime.now().strftime("%Y-%m-%d %H:%M"))
-
-        await channel.send(embed=embed)
-
-        # Optional ping — uncomment to enable
-        # await channel.send("<@&ROLE_ID>")
-
-        seen_sales.add(unique)
-
-    save_seen(seen_sales)
-    print(f"✅ Posted {len(new_sales)} new sales.")
-
-# -------------------------
-# CLEANUP LOOP
-# -------------------------
-@tasks.loop(hours=12)
-async def cleanup_seen():
-    global seen_sales
-    async with aiohttp.ClientSession() as session:
-        current = set()
-        for fn in [check_steam, check_battlenet, check_xbox, check_playstation]:
-            res = await fn(session)
-            current.update(s[0] for s in res)
-        removed = seen_sales - current
-        if removed:
-            print(f"🧹 Cleaning {len(removed)} expired sales...")
-            seen_sales -= removed
-            save_seen(seen_sales)
-
-# -------------------------
-# DISCORD EVENTS
-# -------------------------
+# --- Discord Bot Behavior ---
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
-    sale_check_loop.start()
-    cleanup_seen.start()
+    check_sales.start()
 
-# -------------------------
-# KEEP-ALIVE WEB SERVER (for Render Free)
-# -------------------------
-app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is alive and running!", 200
+@tasks.loop(minutes=60)
+async def check_sales():
+    print("🔎 Checking all stores...")
+    channel = client.get_channel(CHANNEL_ID)
+    seen = load_seen_sales()
+    new_seen = set(seen)
 
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    found_sales = await check_all_stores()
 
-threading.Thread(target=run_web).start()
+    for sale_id, name, url, off, was, now in found_sales:
+        if sale_id not in seen:
+            embed = discord.Embed(
+                title=f"{name} is on sale!",
+                url=url,
+                description=f"**{off}** — Was **{was}**, now **{now}**",
+                color=0x00ff99
+            )
+            embed.set_footer(text="Call of Duty Sale Tracker")
+            await channel.send(embed=embed)
+            new_seen.add(sale_id)
 
-# -------------------------
-# RUN BOT
-# -------------------------
-if TOKEN and CHANNEL_ID:
-    client.run(TOKEN)
-else:
-    print("❌ Missing DISCORD_TOKEN or DISCORD_CHANNEL_ID in secret.env")
+    # Remove old sales if no longer active
+    current_ids = {s[0] for s in found_sales}
+    for old_sale in list(seen):
+        if old_sale not in current_ids:
+            new_seen.discard(old_sale)
+
+    save_seen_sales(new_seen)
+    print("✅ Done checking.")
+
+
+client.run(TOKEN)
