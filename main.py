@@ -5,38 +5,34 @@ import discord
 from discord.ext import tasks
 from datetime import datetime
 from bs4 import BeautifulSoup
+import threading
+from flask import Flask
+from dotenv import load_dotenv
 
 # -------------------------
-# LOAD SECRET.ENV
+# LOAD SECRETS
 # -------------------------
-try:
-    from dotenv import load_dotenv
-    load_dotenv("secret.env")
-except ImportError:
-    print("⚠️ python-dotenv not installed (only needed for local testing).")
+load_dotenv("secret.env")
 
-# -------------------------
-# CONFIGURATION
-# -------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
+# -------------------------
+# GAME LINKS
+# -------------------------
 STEAM_GAMES = {
     "Black Ops 1": "https://store.steampowered.com/app/42700/",
     "Black Ops 2": "https://store.steampowered.com/app/202970/",
     "Black Ops 3": "https://store.steampowered.com/app/311210/",
 }
-
 BATTLENET_GAMES = {
     "Black Ops 4": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-4",
     "Cold War": "https://us.shop.battle.net/en-us/product/call-of-duty-black-ops-cold-war",
 }
-
 XBOX_TITLES = {
     "Black Ops 3": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-iii/C3Q2WWJJ2T1H",
     "Black Ops 4": "https://www.xbox.com/en-US/games/store/call-of-duty-black-ops-4/C19N0723PHFL",
 }
-
 PS_TITLES = {
     "Black Ops 3": "https://store.playstation.com/en-us/product/UP0002-CUSA02290_00-CODBO3ZOMBIESEDN",
 }
@@ -45,13 +41,13 @@ CHECK_INTERVAL = 3600  # seconds (1 hour)
 SEEN_FILE = "seen_sales.txt"
 
 # -------------------------
-# DISCORD CLIENT SETUP
+# DISCORD SETUP
 # -------------------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 # -------------------------
-# SEEN SALES HANDLER
+# FILE HANDLERS
 # -------------------------
 def load_seen():
     if not os.path.exists(SEEN_FILE):
@@ -67,17 +63,7 @@ def save_seen(seen):
 seen_sales = load_seen()
 
 # -------------------------
-# PRICE PARSER
-# -------------------------
-def parse_price(text):
-    text = text.replace(",", "").replace("$", "")
-    try:
-        return float(text)
-    except:
-        return None
-
-# -------------------------
-# SCRAPING FUNCTIONS
+# SCRAPERS
 # -------------------------
 async def check_steam(session):
     found = []
@@ -100,7 +86,6 @@ async def check_steam(session):
             print(f"[Steam] Error checking {name}: {e}")
     return found
 
-
 async def check_battlenet(session):
     found = []
     for name, url in BATTLENET_GAMES.items():
@@ -114,7 +99,6 @@ async def check_battlenet(session):
             print(f"[Battle.net] Error checking {name}: {e}")
     return found
 
-
 async def check_xbox(session):
     found = []
     for name, url in XBOX_TITLES.items():
@@ -127,7 +111,6 @@ async def check_xbox(session):
         except Exception as e:
             print(f"[Xbox] Error checking {name}: {e}")
     return found
-
 
 async def check_playstation(session):
     found = []
@@ -183,7 +166,7 @@ async def sale_check_loop():
 
         await channel.send(embed=embed)
 
-        # Optional role ping — uncomment if desired
+        # Optional ping — uncomment to enable
         # await channel.send("<@&ROLE_ID>")
 
         seen_sales.add(unique)
@@ -191,9 +174,8 @@ async def sale_check_loop():
     save_seen(seen_sales)
     print(f"✅ Posted {len(new_sales)} new sales.")
 
-
 # -------------------------
-# CLEANUP OLD SALES
+# CLEANUP LOOP
 # -------------------------
 @tasks.loop(hours=12)
 async def cleanup_seen():
@@ -219,7 +201,22 @@ async def on_ready():
     cleanup_seen.start()
 
 # -------------------------
-# RUN
+# KEEP-ALIVE WEB SERVER (for Render Free)
+# -------------------------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive and running!", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+threading.Thread(target=run_web).start()
+
+# -------------------------
+# RUN BOT
 # -------------------------
 if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
