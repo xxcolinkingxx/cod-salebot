@@ -4,16 +4,16 @@ import aiohttp
 import discord
 from discord.ext import tasks
 from dotenv import load_dotenv
+from threading import Thread
+from flask import Flask
 
 # ────────────────────────────────
 # Load secrets
 # ────────────────────────────────
 load_dotenv("secret.env")
-
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_RAW = os.getenv("DISCORD_CHANNEL_ID")
 
-# Print debug info to confirm env loading
 print("DISCORD_TOKEN:", "Loaded" if TOKEN else "Missing")
 print("DISCORD_CHANNEL_ID raw:", CHANNEL_ID_RAW)
 
@@ -82,7 +82,7 @@ def create_sale_embed(name, platform, url, was, now, image_url=None):
     return embed
 
 # ────────────────────────────────
-# API fetchers (Steam, Xbox, PS, Battle.net)
+# API fetchers
 # ────────────────────────────────
 async def fetch_steam(session, appid):
     url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=us&l=en"
@@ -179,19 +179,19 @@ async def check_all_sales():
     async with aiohttp.ClientSession() as session:
         tasks_list = []
 
-        for name, appid in GAMES["Steam"].items():
+        for name, appid in GAMES.get("Steam", {}).items():
             tasks_list.append(fetch_steam(session, appid))
-        for name, pid in GAMES["Xbox"].items():
+        for name, pid in GAMES.get("Xbox", {}).items():
             tasks_list.append(fetch_xbox(session, pid))
-        for name, pid in GAMES["PlayStation"].items():
+        for name, pid in GAMES.get("PlayStation", {}).items():
             tasks_list.append(fetch_playstation(session, pid))
-        for name, slug in GAMES["Battle.net"].items():
+        for name, slug in GAMES.get("Battle.net", {}).items():
             tasks_list.append(fetch_battlenet(session, slug))
 
         results = await asyncio.gather(*tasks_list)
         channel = client.get_channel(CHANNEL_ID)
         if not channel:
-            print("Channel not found.")
+            print("❌ Channel not found.")
             return
 
         current_ids = set()
@@ -217,6 +217,12 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
+    # Send confirmation message
+    channel = client.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send("✅ Bot is online and running!")
+    else:
+        print("❌ Channel not found for online message.")
     check_sales.start()
 
 @tasks.loop(minutes=30)
@@ -224,7 +230,22 @@ async def check_sales():
     await check_all_sales()
 
 # ────────────────────────────────
-# Run bot
+# Minimal Flask server for Render
+# ────────────────────────────────
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Discord bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+Thread(target=run_flask).start()
+
+# ────────────────────────────────
+# Run Discord bot
 # ────────────────────────────────
 if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
