@@ -5,19 +5,16 @@ import discord
 from discord.ext import tasks
 from dotenv import load_dotenv
 
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 # Load secrets
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 load_dotenv("secret.env")
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
-print("TOKEN =", TOKEN)
-print("CHANNEL_ID =", CHANNEL_ID)
 
-
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 # Game info
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 GAMES = {
     "Steam": {
         "Call of Duty: Black Ops III": 311210,
@@ -43,9 +40,9 @@ PLATFORM_COLORS = {
     "Battle.net": 0x009AE4,
 }
 
-# ────────────────────────────────────────────────
-# Seen sales memory
-# ────────────────────────────────────────────────
+# ────────────────────────────────
+# Memory
+# ────────────────────────────────
 def load_seen_sales():
     if not os.path.exists("seen_sales.txt"):
         return set()
@@ -59,13 +56,13 @@ def save_seen_sales(seen):
 
 seen_sales = load_seen_sales()
 
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 # Embed builder
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 def create_sale_embed(name, platform, url, was, now, image_url=None):
     embed = discord.Embed(
         title=name,
-        description=f"🛒 **On Sale on {platform}**\n\n💰 **Was:** {was}\n💵 **Now:** {now}\n\n[View Deal]({url})",
+        description=f"🛒 **On Sale on {platform}**\n\n💰 **Was:** {was or '—'}\n💵 **Now:** {now or '—'}\n\n[View Deal]({url})",
         color=PLATFORM_COLORS.get(platform, 0x2F3136)
     )
     if image_url:
@@ -73,38 +70,38 @@ def create_sale_embed(name, platform, url, was, now, image_url=None):
     embed.set_footer(text=f"{platform}")
     return embed
 
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 # API fetchers
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 async def fetch_steam(session, appid):
     url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=us&l=en"
-    async with session.get(url) as r:
-        data = await r.json()
-        app = data[str(appid)]
-        if app["success"]:
-            info = app["data"]
-            if info.get("price_overview") and info["price_overview"]["discount_percent"] > 0:
-                return {
-                    "name": info["name"],
-                    "platform": "Steam",
-                    "url": f"https://store.steampowered.com/app/{appid}/",
-                    "was": info["price_overview"]["initial_formatted"],
-                    "now": info["price_overview"]["final_formatted"],
-                    "image": info.get("header_image")
-                }
+    try:
+        async with session.get(url) as r:
+            data = await r.json()
+            app = data[str(appid)]
+            if app["success"]:
+                info = app["data"]
+                po = info.get("price_overview")
+                if po and po.get("discount_percent", 0) > 0:
+                    return {
+                        "name": info["name"],
+                        "platform": "Steam",
+                        "url": f"https://store.steampowered.com/app/{appid}/",
+                        "was": po.get("initial_formatted", "—"),
+                        "now": po.get("final_formatted", "—"),
+                        "image": info.get("header_image")
+                    }
+    except Exception as e:
+        print(f"[Steam {appid}] Error: {e}")
     return None
 
 async def fetch_xbox(session, product_id):
     url = f"https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds={product_id}&market=US&languages=en-US"
-    async with session.get(url) as r:
-        data = await r.json()
-        try:
+    try:
+        async with session.get(url) as r:
+            data = await r.json()
             product = data["Products"][0]
             price_info = product["DisplaySkuAvailabilities"][0]["Availabilities"][0]["OrderManagementData"]["Price"]
-            if price_info["ListPrice"] > price_info["MSRP"]:
-                return None
-            if price_info["ListPrice"] > price_info["MSRP"]:  # sanity double-check
-                return None
             if price_info["MSRP"] > price_info["ListPrice"]:
                 return {
                     "name": product["LocalizedProperties"][0]["Title"],
@@ -112,73 +109,76 @@ async def fetch_xbox(session, product_id):
                     "url": f"https://www.xbox.com/en-us/games/store/{product_id}",
                     "was": f"${price_info['MSRP']:.2f}",
                     "now": f"${price_info['ListPrice']:.2f}",
-                    "image": product["Images"][0]["Uri"]
+                    "image": product.get("Images", [{}])[0].get("Uri")
                 }
-        except Exception:
-            return None
+    except Exception as e:
+        print(f"[Xbox {product_id}] Error: {e}")
     return None
 
 async def fetch_playstation(session, product_id):
     url = f"https://store.playstation.com/store/api/chihiro/00_09_000/container/US/en/19/{product_id}"
-    async with session.get(url) as r:
-        data = await r.json()
-        try:
-            sku = data["default_sku"]
-            if "display_price" in sku and "original_price" in sku and sku["display_price"] != sku["original_price"]:
+    try:
+        async with session.get(url) as r:
+            data = await r.json()
+            sku = data.get("default_sku", {})
+            dp = sku.get("display_price")
+            op = sku.get("original_price")
+            if dp and op and dp != op:
+                images = sku.get("images", [])
+                img_url = images[0].get("url") if images else None
                 return {
-                    "name": sku["name"],
+                    "name": sku.get("name") or data.get("name"),
                     "platform": "PlayStation",
                     "url": f"https://store.playstation.com/en-us/product/{product_id}",
-                    "was": sku["original_price"],
-                    "now": sku["display_price"],
-                    "image": sku.get("images", [{}])[0].get("url")
+                    "was": op,
+                    "now": dp,
+                    "image": img_url
                 }
-        except Exception:
-            return None
+    except Exception as e:
+        print(f"[PS {product_id}] Error: {e}")
     return None
 
-async def fetch_battlenet(session, product_slug):
-    url = f"https://us.shop.battle.net/api/product/{product_slug}"
-    async with session.get(url) as r:
-        data = await r.json()
-        try:
+async def fetch_battlenet(session, slug):
+    url = f"https://us.shop.battle.net/api/product/{slug}"
+    try:
+        async with session.get(url) as r:
+            data = await r.json()
             price = data.get("price", {})
-            if price.get("discounted") and price["discounted"] != price["original"]:
+            discounted = price.get("discounted")
+            original = price.get("original")
+            if discounted and original and discounted != original:
+                image_url = data.get("media", [{}])[0].get("url")
                 return {
-                    "name": data["name"],
+                    "name": data.get("name"),
                     "platform": "Battle.net",
-                    "url": f"https://us.shop.battle.net/en-us/product/{product_slug}",
-                    "was": f"${price['original']}",
-                    "now": f"${price['discounted']}",
-                    "image": data.get("media", [{}])[0].get("url")
+                    "url": f"https://us.shop.battle.net/en-us/product/{slug}",
+                    "was": f"${original}",
+                    "now": f"${discounted}",
+                    "image": image_url
                 }
-        except Exception:
-            return None
+    except Exception as e:
+        print(f"[Battle.net {slug}] Error: {e}")
     return None
 
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 # Main sale checker
-# ────────────────────────────────────────────────
+# ────────────────────────────────
 async def check_all_sales():
     global seen_sales
     async with aiohttp.ClientSession() as session:
         tasks_list = []
 
-        # Steam
+        # Build tasks
         for name, appid in GAMES["Steam"].items():
             tasks_list.append(fetch_steam(session, appid))
-        # Xbox
         for name, pid in GAMES["Xbox"].items():
             tasks_list.append(fetch_xbox(session, pid))
-        # PlayStation
         for name, pid in GAMES["PlayStation"].items():
             tasks_list.append(fetch_playstation(session, pid))
-        # Battle.net
         for name, slug in GAMES["Battle.net"].items():
             tasks_list.append(fetch_battlenet(session, slug))
 
         results = await asyncio.gather(*tasks_list)
-
         channel = client.get_channel(CHANNEL_ID)
         if not channel:
             print("Channel not found.")
@@ -190,23 +190,17 @@ async def check_all_sales():
             current_ids.add(unique_id)
             if unique_id not in seen_sales:
                 embed = create_sale_embed(
-                    sale["name"],
-                    sale["platform"],
-                    sale["url"],
-                    sale["was"],
-                    sale["now"],
-                    sale.get("image")
+                    sale["name"], sale["platform"], sale["url"], sale["was"], sale["now"], sale.get("image")
                 )
                 await channel.send(embed=embed)
                 print(f"Posted sale: {sale['name']} on {sale['platform']}")
 
-        # remove old sales
         seen_sales = current_ids
         save_seen_sales(seen_sales)
 
-# ────────────────────────────────────────────────
-# Discord bot
-# ────────────────────────────────────────────────
+# ────────────────────────────────
+# Discord bot setup
+# ────────────────────────────────
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
@@ -223,4 +217,3 @@ if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
 else:
     print("❌ Missing DISCORD_TOKEN or CHANNEL_ID in secret.env")
-
