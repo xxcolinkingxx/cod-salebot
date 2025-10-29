@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 load_dotenv("secret.env")
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
+print("TOKEN =", TOKEN)
+print("CHANNEL_ID =", CHANNEL_ID)
+
 
 # ────────────────────────────────────────────────
 # Game info
@@ -220,3 +223,4 @@ if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
 else:
     print("❌ Missing DISCORD_TOKEN or CHANNEL_ID in secret.env")
+
