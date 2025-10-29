@@ -9,8 +9,19 @@ from dotenv import load_dotenv
 # Load secrets
 # ────────────────────────────────
 load_dotenv("secret.env")
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
+CHANNEL_ID_RAW = os.getenv("DISCORD_CHANNEL_ID")
+
+# Print debug info to confirm env loading
+print("DISCORD_TOKEN:", "Loaded" if TOKEN else "Missing")
+print("DISCORD_CHANNEL_ID raw:", CHANNEL_ID_RAW)
+
+try:
+    CHANNEL_ID = int(CHANNEL_ID_RAW)
+except (TypeError, ValueError):
+    CHANNEL_ID = 0
+print("DISCORD_CHANNEL_ID as int:", CHANNEL_ID)
 
 # ────────────────────────────────
 # Game info
@@ -41,7 +52,7 @@ PLATFORM_COLORS = {
 }
 
 # ────────────────────────────────
-# Memory
+# Memory for seen sales
 # ────────────────────────────────
 def load_seen_sales():
     if not os.path.exists("seen_sales.txt"):
@@ -71,7 +82,7 @@ def create_sale_embed(name, platform, url, was, now, image_url=None):
     return embed
 
 # ────────────────────────────────
-# API fetchers
+# API fetchers (Steam, Xbox, PS, Battle.net)
 # ────────────────────────────────
 async def fetch_steam(session, appid):
     url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=us&l=en"
@@ -168,7 +179,6 @@ async def check_all_sales():
     async with aiohttp.ClientSession() as session:
         tasks_list = []
 
-        # Build tasks
         for name, appid in GAMES["Steam"].items():
             tasks_list.append(fetch_steam(session, appid))
         for name, pid in GAMES["Xbox"].items():
@@ -213,7 +223,10 @@ async def on_ready():
 async def check_sales():
     await check_all_sales()
 
+# ────────────────────────────────
+# Run bot
+# ────────────────────────────────
 if TOKEN and CHANNEL_ID:
     client.run(TOKEN)
 else:
-    print("❌ Missing DISCORD_TOKEN or CHANNEL_ID in secret.env")
+    print("❌ Missing DISCORD_TOKEN or DISCORD_CHANNEL_ID in secret.env")
